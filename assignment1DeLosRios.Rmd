@@ -1,0 +1,172 @@
+---
+title: "Assignment 1 - Data Set Selection and Initial Processing"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+---
+
+# Required packages
+```{r} 
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!requireNamespace("GEOmetadb", quietly = TRUE))
+  install.packages("GEOmetadb")
+if (!requireNamespace("GEOquery", quietly = TRUE))
+  install.packages("GEOquery")
+if(!requireNamespace("edgeR", quietly = TRUE))
+  install.packages("edgeR")
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE))
+  BiocManager::install("org.Hs.eg.db", update = FALSE)
+require(org.Hs.eg.db)
+```
+
+# Downloading the dataset
+## GEOmetadb
+Our first step involves downloading the GEOmeta file required to access the gene
+dataset we will be analyzing.
+```{r}
+options(timeout = 0) #in case download takes longer than 30s
+if(!file.exists('GEOmetadb.sqlite'))
+  GEOmetadb::getSQLiteFile()
+```
+       
+## Accessing supplementary files
+The data we are interested in, gene expression counts, is contained within the
+supplementary file associated with our publication. Thus, we must retrieve it
+before we do anything else.
+```{r}
+sfiles = GEOquery::getGEOSuppFiles('GSE166847')
+fnames = rownames(sfiles)
+supp_counts_data = read.delim(fnames[1], header = TRUE, check.names = FALSE)
+```
+               
+## Accessing dataset platform information
+```{r}
+gse <- GEOquery::getGEO("GSE166847", GSEMatrix = FALSE)
+current_gpl <- names(GEOquery::GPLList(gse))[1]
+current_gpl_info <- GEOquery::Meta(GEOquery::getGEO(current_gpl))
+```
+                    
+The dataset we are accessing is GSE166847   
+Platform title : `r current_gpl_info$title`  
+Submission date : `r current_gpl_info$submission_date`  
+Last update date : `r current_gpl_info$last_update_date`  
+Organism : `r current_gpl_info$organism` (taxid: `r current_gpl_info$taxid`).          
+    
+The dataset contains 20 samples, 5 samples for each of the 4 experimental conditions. The experimental conditions are human primary astrocytes being exposed to 0, 1, 3, or 4 bouts of 0.1 mmol/l of low glucose for three hours per day for 4 days. Naturally, the HPA that was exposed to 0 bouts of low glucose act as the control group that other samples can utilize as a benchmark.            
+The purpose of the experiment is to measure the effect of recurrent hypoglycaemia on HPA cells. HPA cells are typically responsible for regulating blood sugar levels, but repeated instances of hypoglycaemia impair the cell's ability to perform this function. Our dataset thus serves the purpose of allowing us to analyze gene expression relative to instances of hypoglycaemia in order to develop a model for the reaction to and longterm impact of recurrent hypoglycaemia in HPA cells.
+
+# Transfering dataset to data frame
+The supplementary file associated with GSE166847 is difficult to work with in 
+the format it comes in, so we transfer it to a data frame to ease future data
+manipulation. We also collect the different types of data categories now to be
+used during normalization later on.
+```{r}
+counts_frame <- data.frame()
+for(i in 1:dim(supp_counts_data)[1]){
+  counts_frame <- rbind(counts_frame, 
+                        unlist(strsplit(supp_counts_data[i,], ","))[c(1, 7:26)])
+}
+colnames(counts_frame) <- 
+                  unlist(strsplit(colnames(supp_counts_data), ","))[c(1, 7:26)]
+colnames(counts_frame)[1] <- "Gene"
+counts_frame[, 2:21] <- lapply(counts_frame[, 2:21], as.numeric)
+data_categories <- unlist(lapply(colnames(counts_frame)[2:21], 
+                        FUN=function(x){unlist(strsplit(x, split = "_[0-9]"))}))
+```
+                                     
+# Cleaning and Filtering Data
+## Duplicate genes and gene expressions
+Our dataset contains `r length(counts_frame$Gene)` genes.   
+Our dataset contains `r length(unique(counts_frame$Gene))` unique genes.   
+Since these values are the same, we have no need to worry about duplicate genes
+skewing our analysis.       
+
+## Filtering statistically insigificant data
+Although our dataset records the expression levels of several genes, a decent 
+portion of these genes are not expressed enough to meaningfully contribute to
+our analysis. We'll use the edgeR package to filter them out of our dataset.
+```{r}
+cpms = edgeR::cpm(counts_frame[, 2:21])
+keep = rowSums(cpms > 1) >= 5   #Our dataset uses 5 samples per group
+filtered_counts_frame <- counts_frame[keep,]
+```
+                             
+The dataset originally contained `r length(counts_frame$Gene)` genes. After 
+being filtered, it only contains `r length(filtered_counts_frame$"Gene")` genes.
+Thus, we filtered out 
+`r length(counts_frame$Gene) - length(filtered_counts_frame$"Gene")` outliers.  
+
+## Unique gene expressions
+The final step in filtering our data is confirming that each gene we analyse
+is expressed uniquely. We can check if one of our antecedent (AH) samples have
+unique expression for each gene to accomplish this.
+The first antecedent sample contains
+`r length(filtered_counts_frame$"2683_PP_AH_1")` genes and reports
+`r length(filtered_counts_frame$"2683_PP_AH_1")` unique values for gene 
+expression. Thus, we know gene expression is unique for each gene and requires
+no further attention. 
+
+Having finished all our data filtering, we can compute our final coverage. Of 
+the `r length(counts_frame$Gene)` genes we started with, we will only be 
+analyzing `r length(filtered_counts_frame$"Gene")` of them. Thus, our final
+coverage is `r length(filtered_counts_frame$"Gene") / length(counts_frame$Gene)`.
+
+## Assigning proper gene symbols
+Our dataset already assigned all its genes to a HUGO symbol so we simply 
+confirm they were mapped appropriately. We then take these symbols and map them
+to their corresponding gene in our filtered data frame.
+```{r}
+rownames(filtered_counts_frame) <- select(org.Hs.eg.db, 
+                                           keys = filtered_counts_frame$Gene, 
+                                           columns = 'SYMBOL', 
+                                           keytype = 'SYMBOL')[[1]]
+```
+                      
+Notably a few of the genes in the dataset, such as RP5-857K21.8, have no known 
+HUGO symbol. We allow them to retain their current name since we gain nothing
+by trying to map these genes to some other symbol like Ensemble IDs.   
+
+# Normalization
+## Boxplot - Data before normalization
+We use a boxplot to observe the state of our data prior to normalization. 
+```{r}
+data2plot <- log2(edgeR::cpm(filtered_counts_frame[, 2:21]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM", 
+       las = 2, cex = 0.5, cex.lab = 0.5,
+       cex.axis = 0.35, main = "HPA RNASeq Samples")
+```
+                              
+## Normalization process
+We utilize TMM normalization both because it is specialized for use with RNAseq 
+data and because we cannot assume that any variation introduced into our data by
+technical means has a similar impact across all genes. Thus we cannot utilize 
+normalization by distribution. We also cannot assume that gene expression in terms of mRNA quantity is equivalent across all samples so we cannot normalize by library size.
+```{r}
+counts_matrix <- as.matrix(filtered_counts_frame[, 2:21])
+rownames(counts_matrix) <- rownames(filtered_counts_frame)
+d = edgeR::DGEList(counts = counts_matrix, group = data_categories)
+d = edgeR::calcNormFactors(d)
+```
+                               
+## Boxplot - Data after normalization
+Now we see what our data looks like following TMM normalization. Notably, since
+the previous boxplot of our data was already fairly close to the ideal shape of
+a normalized dataset, this boxplot is not significantly different.
+```{r}
+normalized_counts <- edgeR::cpm(d)
+data2plot <- log2(edgeR::cpm(normalized_counts))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.35, main = "Normalized HPA RNASeq Samples")
+```
+
+# Final data frame
+Now that we've cleaned and normalized our dataset, we transfer our normalized
+counts into a data frame.
+```{r}
+final_counts_frame <- as.data.frame(normalized_counts)
+```
