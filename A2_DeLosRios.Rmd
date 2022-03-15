@@ -1,0 +1,158 @@
+---
+title: "BCB420 - Computational Systems Biology"
+author: "Juan De Los Rios"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_depth: 2
+subtitle: Assignment 2 - Differential Gene Expression and Preliminary ORA
+bibliography: A2_DeLosRios.bib
+---
+# Required packages. 
+```{r} 
+if (!requireNamespace("limma", quietly = TRUE))
+  install.packages("limma")
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE))
+  install.packages("ComplexHeatmap")
+if(!requireNamespace("edgeR", quietly = TRUE))
+  install.packages("edgeR")
+if (!requireNamespace("circlize", quietly = TRUE))
+  install.packages("circlize")
+```
+
+# Preparations for Analysis. 
+We will be performing differential expression and threshold over-representation analysis of our dataset downloaded from GEO with id GSE166847. The dataset measures gene expression in human primary astrocytes relative to exposure to recurrent hypoglycaemia for the purpose of investigating the long-term impact it has on HPAs. On a previous occasion we filtered statistically insignificant results from our dataset, reducing the total gene count from 56870 to 13691, and utilized TMM normalization to account for any biological or technical variation introduced by our methods. Our final result was a table of normalized counts which will serve as the basis for our analysis.  
+```{r}
+final_counts_frame <- read.table(
+  file = file.path(getwd(), "GSE166847_final_counts_frame.txt"), 
+  header = TRUE, 
+  sep = "\t", 
+  stringsAsFactors = FALSE, 
+  check.names = FALSE)
+```
+![Summary of Differential Expression Analysis from Original Article](`r getwd()`/GSE166847_summary.png)  
+**FIGURE 1. Table of DE Analysis Results from Original Article** This table summarizes the genes found to be significantly expressed by the original article we retrieved out dataset from, including their calculated p-values. [@potter2020analysis] Our goal will be to perform our own DE analysis to see if we can confirm their results.  
+
+
+## Defining Model Design. 
+Before our analysis can begin we need to define a model design to calculate differential expression. To this end, we'll construct an MDS plot to highlight the factors to be used in our analysis.  
+```{r}
+data_categories <- unlist(lapply(colnames(final_counts_frame), 
+                        FUN=function(x){unlist(strsplit(x, split = "_[0-9]"))}))
+limma::plotMDS(final_counts_frame, labels = unique(data_categories), col = c("red", "blue", "yellow", "green"), main = "MDS Plot of Normalized Counts")
+```
+**FIGURE 2. MDS PLOT OF NORMALIZED COUNTS.** This plot visualizes how our normalized gene expression counts cluster when divided into our dataset's experimental categories. Counts from the control groups are labelled blue, counts from the recurrent low glucose (RLG) groups are labelled green, counts from the antecedent RLG groups are labelled red, and counts from the low glucose groups are labelled yellow.  
+
+From the MDS plot we can see some evidence of clustering based on our dataset's experimental categories.  There exist tight clusters based on experimental categories, such as the CONT and RH clusters found towards the bottom of the plot, as well as comparativeyl weaker clusters such as that of the AH counts found towards the top of the plot. Thus, we will utilize these as our factors 
+
+# Analyzing Differential Gene Expression. 
+## Calculating p-values and multiple hypothesis testing. 
+To see whether any genes are significantly over- or -underexpressed in our dataset we will calculate their p-value, a measure of the statistical significance of their divergence from average expression. We will be using edgeR functions to accomplish this as they allow us to use the Quasi Likelihood model specially suited for handling bulk RNAseq measures.  
+
+For our multiple hypothesis correction method we use the default Benjamini-Hochberg procedure since other procedures tend to be too conservative in eliminating false positives.  
+
+For both our p-value and FDR threshold we will use the value 0.05 since it is accepted as the ideal value for balancing between wanting to filter out misleading results and avoiding being so stringent as to filter out legitimate values.  
+```{r message=FALSE}
+model_design <- model.matrix(~ data_categories)
+d = edgeR::DGEList(counts = final_counts_frame, group = data_categories)
+d <- edgeR::estimateDisp(d, model_design)
+fit <- edgeR::glmQLFit(d, model_design)
+qlf.pos_vs_neg <- edgeR::glmQLFTest(fit)
+qlf_output_hits <- edgeR::topTags(qlf.pos_vs_neg, sort.by = "PValue", 
+                                  n = nrow(final_counts_frame), 
+                                  adjust.method = "BH")
+```
+## Results. 
+The number of genes that pass our threshold p-value is then `r length(which(qlf_output_hits$table$PValue < 0.05))`.  
+The number of genes that pass correction is 
+`r length(which(qlf_output_hits$table$FDR < 0.05))`.  
+We can also use a plot to visualize our gene expression, particularly for genes we predict would have significantly elevated expression.  
+```{r message=FALSE}
+qlf_pvalue_frame <- data.frame(HUGO_symbol = rownames(qlf_output_hits$table), 
+                        qlf_log10_pvalue = -log10(qlf_output_hits$table$PValue))
+qlf_logFC_frame <- data.frame(HUGO_symbol = rownames(qlf_output_hits$table), 
+                              qlf_logFC = qlf_output_hits$table$logFC)
+qlf_merged_frames <- merge(qlf_pvalue_frame, qlf_logFC_frame, 
+                           by.x = 1, by.y = 1)
+qlf_merged_frames$colour <- "black"
+qlf_merged_frames$colour[qlf_merged_frames$qlf_log10_pvalue > 1.30103] <- "red"
+qlf_merged_frames$colour[qlf_merged_frames$HUGO_symbol == "TXNIP"] <- "purple"
+qlf_merged_frames$colour[qlf_merged_frames$HUGO_symbol == "XBP1"] <- "blue"
+qlf_merged_frames$colour[qlf_merged_frames$HUGO_symbol == "MANF"] <- "green"
+plot(qlf_merged_frames$qlf_logFC, qlf_merged_frames$qlf_log10_pvalue, 
+     col = qlf_merged_frames$colour, xlab = "logFC", ylab = "-log10(Pvalue)", 
+     main = "Volcano Plot of Gene Expression Data")
+points(qlf_merged_frames[qlf_merged_frames$HUGO_symbol == "HSPA5", 2:3], 
+       pch = 20, col = "yellow", cex = 1.5)
+legend(1.4, 3.6, legend = c("Significantly expressed", 
+                            "TXNIP", "XBP1", "HSPA5", "MANF", "Rest"), 
+       fill = c("Red", "Purple", "Blue", "Yellow", "Green", "Black"), 
+       cex = 0.5)
+```
+**FIGURE 3. Volcano Plot of Gene Expression Data.** This plot visualizes the statistical significance of each gene's differential expression, with points marked in red representing significantly expressed genes and the point in black representing insignificantly expressed genes. Genes plotted to the right of logFC = 0 were overexpressed while genes plotted to the left of logFC = 0 were underexpressed. The plot also marks genes of interest with the colors purple, blue, yellow, and green.  
+
+We can also use a heatmap to test if the conditions we defined in our model cluster together.  
+```{r warning=FALSE}
+top_hits <- rownames(qlf_output_hits$table)[qlf_output_hits$table$PValue < 0.05]
+heatmap_matrix_tophits <- t(scale(t(
+  final_counts_frame[which(rownames(final_counts_frame) %in% top_hits), ])))
+if(min(heatmap_matrix_tophits) == 0){
+  heatmap_col = circlize::colorRamp2(c(0, max(heatmap_matrix_tophits)), 
+                                     c("white", "red"))
+} else{
+  heatmap_col = circlize::colorRamp2(c(min(heatmap_matrix_tophits), 0, 
+                                       max(heatmap_matrix_tophits)), 
+                                     c("blue", "white", "red"))
+}
+current_heatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmap_matrix_tophits), 
+                                           cluster_rows = TRUE, 
+                                           cluster_columns = FALSE,
+                                           show_row_dend = TRUE,
+                                           show_column_dend = FALSE,
+                                           col = heatmap_col,
+                                           show_column_names = TRUE,
+                                           show_row_names = FALSE, 
+                                           show_heatmap_legend = TRUE, 
+                                           name = "QLF Top hits Heatmap")
+current_heatmap
+```
+**FIGURE 4. Heatmap of Top Hits.** Each column of the heatmap corresponds to a sample belonging to the stated experimental categories from our dataset, measuring the differential expression of each gene within said sample. Red portions signify overexpression while blue areas signify underexpression. White areas signify insignificant differential expression.  
+
+On our heatmap we can see that our RH and AH categories cluster strongly, while our CONT and HYPO categories cluster comparatively weakly. The general trend is that for each category the first or second sample diverges from the other within the same category, although the CONT category defies this trend.  
+
+# Thresholded over-representation analysis. 
+## Thresholded list of genes. 
+To begin our ORA we must first create a list of up- and down-regulated genes. 
+```{r}
+upregulated_genes <- 
+  rownames(qlf_output_hits$table)[qlf_output_hits$table$PValue < 0.05 & qlf_output_hits$table$logFC > 0]
+downregulated_genes <- 
+  rownames(qlf_output_hits$table)[qlf_output_hits$table$PValue < 0.05 & qlf_output_hits$table$logFC < 0]
+```
+## GProfiler Results
+For our ORA we once again chose to use the Benjamini-Hochberg multiple test correction method, again because other correction methods available to us are too conservative and carry too great a risk of allowing false positives to skew our results.  
+For our annotation data we drew from GO biological processes, Reactome and WikiPathways. The dataset was collected with the intention of identifying the biological pathways impacted by exposure to low glucose and so we naturally focus on annotation data about these pathways for our analysis.  
+
+![Analysis of All Genes](`r getwd()`/gProfiler_hsapiens_allgenes.png)  
+**FIGURE 5. GProfiler Results With All DE Genes as Query** Limiting our results to genesets containing 5-200 genes for the sake of excluding large and largely uninformative sets from our results, we retrieved 151 genesets from GO biological processes, 68 from Reactome and 2 from WikiPathways.  
+
+![Analysis of Overrepresented Genes](`r getwd()`/gProfiler_hsapiens_overexpression.png)  
+**FIGURE 6. GProfiler Results With Overexpressed Genes as Query** Compared to the analysis of all our significantly expressed genes, the analysis of only overexpressed genes returned considerably less genesets (9 from GO biological processes and 14 from Reactome). All the genesets included in the results of this analysis were also included in the analysis of all significantly expressed genes.  
+
+![Analysis of Underrepresented Genes](`r getwd()`/gProfiler_hsapiens_underexpression.png)  
+**FIGURE 7. GProfiler Results With Underexpressed Genes as Query** Analysis of unrepresented genes actually returned a greater number of genesets (162 from GO biological processes, 79 from Reactone and 3 from Wikipathways) than our analysis of all significantly expressed genes. Notably, genesets relating to the cell's response to endoplasmic reticulum stress are absent from the results of underrepresented genes.  
+
+# Interpreting and Discussing Results. 
+The original paper from which we took our dataset concluded that endoplasmic-reticulum stress-related genes involved in the unfolded protein response such as TXNIP, HSPA5, XBP1, and MANF were significantly overexpressed following low glucose exposure but underexpressed when subjected to recurrent low glucose. [@potter2020analysis] For the most part, our results support this conclusion. Our Volcano plot of gene expression data confirmed that of the aforementioned genes of interest, only HSPA5 was deemed statistically insignificant in its expression. The results of our ORA on Gprofiler further support this, with our query returning 2 genesets involved in regulating endoplasmic reticulum stress, 1 geneset involved in endoplasmic reticulum unfolded protein response and 1 geneset involved in IRE1-mediated unfolded protein response. Our heatmap, which showed that genes in the AH category exhibited significant overexpression expression but exhibited significant underexpression in the HYPO and RH categories, again supports the idea that hypoglycaemia induces some type of stress regulation that results in reduced gene expression over prolonged periods of time.  
+
+The results from our analysis are further supported by another article on the impact of hypolgycaemia on HPAs. The research conducted for the article concluded that recurrent low glucose induced mitochondrial activity as it attempted to ramp up its rate of fatty acid oxidation. [@potter2018human] Our gProfiler analysis returned several genesets relating to ATp synthesis coupled electron transport, suggesting that as the article would predict our HPAs experienced increased mitochondrial activity in response to exposure to low glucose.
+
+# Link to Journal
+https://github.com/bcb420-2022/Juan_De_Los_Rios/wiki/Assignment2  
+
+# References
