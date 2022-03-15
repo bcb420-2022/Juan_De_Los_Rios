@@ -14,6 +14,7 @@ subtitle: Assignment 2 - Differential Gene Expression and Preliminary ORA
 bibliography: A2_DeLosRios.bib
 ---
 # Required packages. 
+We will be using functions from the limma [@limma2015], ComplexHeatmap [@ComplexHeatmap2016], edgeR [@edgeR2016] and circlize [@circlize2014] packages. We will also be using code taken from BCB420 lectures. [@Isserlin2022]
 ```{r} 
 if (!requireNamespace("limma", quietly = TRUE))
   install.packages("limma")
